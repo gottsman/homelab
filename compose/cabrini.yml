@@ -1,0 +1,961 @@
+# version: '3.9'
+include:
+  - docker-private.yml
+
+services:
+
+  # #######################################################################
+  #
+  #                               Tools
+  #
+  # #######################################################################
+  dozzle:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - 9999:8080
+    environment:
+      - DOZZLE_NO_ANALYTICS=false
+    depends_on:
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dozzle.entryPoints=https"
+      - "traefik.http.routers.dozzle.service=dozzle"
+      - "traefik.http.services.dozzle.loadBalancer.server.port=8080"
+      - "traefik.http.routers.dozzle.middlewares=authelia@docker"
+
+  authelia:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: authelia/authelia:latest
+    container_name: authelia
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/authelia:/config
+    depends_on:
+      proxy:
+        condition: "service_started"
+    expose:
+      - 9091
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.authelia.rule=Host(`auth.${DOMAINSUFFIX}`)"
+      - "traefik.http.routers.authelia.entryPoints=https"
+      - "traefik.http.routers.authelia.service=authelia"
+      - "traefik.http.services.authelia.loadBalancer.server.port=9091"
+      - "traefik.http.middlewares.authelia.forwardauth.address=http://authelia:9091/api/verify?rd=https://auth.${DOMAINSUFFIX}"
+      - "traefik.http.middlewares.authelia.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.authelia.forwardauth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Name,Remote-Email"
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+
+  ad-mqtt:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: ${REGISTRY_SERVER}/ad-mqtt:latest
+    restart: unless-stopped
+    container_name: ad-mqtt
+    environment:
+      - ADMQTT_SOCKET_HOST=192.168.5.2
+      - ADMQTT_MQTT_HOST=192.168.5.3
+      - ADMQTT_LOG_LEVEL=INFO
+      - ADMQTT_ALARM_CODE=${ADMQTT_ALARM_CODE}
+      - ADMQTT_MQTT_USERNAME=${ADMQTT_MQTT_USERNAME}
+      - ADMQTT_MQTT_PASSWORD=${ADMQTT_MQTT_PASSWORD}
+    networks:
+      - homelab
+    depends_on:
+      dozzle:
+        condition: "service_started"
+
+  ff:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: jlesage/firefox:latest
+    container_name: ff
+    restart: always
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    networks:
+      - homelab
+    expose:
+      - 5800
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/firefox:/config
+    environment:
+      # - PUID=${PUID}
+      # - PGID=${PGID}
+      - TZ=${TZ}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ff.entryPoints=https"
+      - "traefik.http.routers.ff.service=ff"
+      - "traefik.http.services.ff.loadbalancer.server.port=5800"
+      - "traefik.http.routers.ff.middlewares=authelia@docker"
+      - "nautical-backup.enable=false"
+
+  adguard-sync:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: ghcr.io/bakito/adguardhome-sync
+    container_name: adguard-sync
+    command: run
+    networks:
+      - homelab
+    depends_on:
+      - dozzle
+    expose:
+      - 8080
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=America/New_York
+      - ORIGIN_URL=${ADGUARDSYNC_ORIGIN_URL}
+      - ORIGIN_USERNAME=${ADGUARDSYNC_USERNAME}
+      - ORIGIN_PASSWORD=${ADGUARDSYNC_PASSWORD}
+      - REPLICA1_URL=${ADGUARDSYNC_REPLICA1_URL}
+      - REPLICA1_USERNAME=${ADGUARDSYNC_USERNAME}
+      - REPLICA1_PASSWORD=${ADGUARDSYNC_PASSWORD}
+      - REPLICA1_AUTO_SETUP=true
+      - CRON=*/2 * * * * # run every 2 minutes
+      - RUN_ON_START=false
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.adguard-sync.entryPoints=https"
+      - "traefik.http.routers.adguard-sync.service=adguard-sync"
+      - "traefik.http.services.adguard-sync.loadBalancer.server.port=8080"
+      - "traefik.http.routers.adguard-sync.middlewares=authelia@docker"
+
+  proxy:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: traefik:v3.0
+    container_name: proxy
+    restart: always
+    networks:
+      - homelab
+    ports:
+      - 0.0.0.0:80:80
+      - 0.0.0.0:443:443
+      - 0.0.0.0:8080:8080
+    command:
+      - --global.checkNewVersion=true
+      - --global.sendAnonymousUsage=false
+
+      - --entryPoints.http.address=:80
+      - --entrypoints.http.http.redirections.entryPoint.to=https
+      - --entrypoints.http.http.redirections.entryPoint.scheme=https
+
+      - --entryPoints.https.address=:443
+      - --entrypoints.https.http.tls.certResolver=letsencrypt
+      - --entrypoints.https.http.tls.domains[0].main=${DOMAINSUFFIX}
+      - --entrypoints.https.http.tls.domains[0].sans=${SANSDOMAINSUFFIX}
+
+      - --certificatesresolvers.letsencrypt.acme.email=${dns_cloudflare_email}
+      - --certificatesresolvers.letsencrypt.acme.storage=/acme.json
+      # - --certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.letsencrypt.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare
+      - --log=true
+      - --log.level=DEBUG  # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      - --accessLog=true
+      - --accessLog.filePath=/traefik.log
+      - --accessLog.bufferingSize=100
+      - --accessLog.filters.statusCodes=400-499
+      - --api=true
+      - --api.insecure=true
+      - --serversTransport.insecureSkipVerify=true
+      - --providers.docker=true
+      - --providers.docker.endpoint=unix:///var/run/docker.sock
+      - --providers.docker.defaultrule=Host(`{{ index .Labels "com.docker.compose.service" }}.$DOMAINSUFFIX`)
+      - --providers.docker.exposedByDefault=false
+      - --providers.file.filename=/config.yml
+      - --providers.file.watch=true
+    volumes:
+      - /etc/traefik:/etc/traefik
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${APPDATA}/traefik/acme.json:/acme.json
+      - ./traefik/config.yml:/config.yml
+      - ${APPDATA}/traefik/traefik.log:/traefik.log
+    environment:
+      - CF_API_EMAIL=${dns_cloudflare_email}
+      - CF_API_KEY=${dns_cloudflare_api_key}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.proxy.entryPoints=https"
+      - "traefik.http.routers.proxy.service=proxy"
+      - "traefik.http.services.proxy.loadBalancer.server.port=8080"
+
+  # #######################################################################
+  #
+  #                               Dashboards
+  #
+  # #######################################################################
+
+  vue:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: jellyfin/jellyfin-vue:unstable
+    container_name: vue
+    restart: always
+    networks:
+      - homelab
+    expose:
+      - 80
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vue.entryPoints=https"
+      - "traefik.http.routers.vue.service=vue"
+      - "traefik.http.services.vue.loadbalancer.server.port=80"
+      - "traefik.http.routers.vue.middlewares=authelia@docker"
+
+  # #######################################################################
+  #
+  #                               Arr
+  #
+  # #######################################################################
+  recyclarr:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: ghcr.io/recyclarr/recyclarr:latest
+    container_name: recyclarr
+    user: ${PUID}:${PGID}
+    restart: always
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    volumes:
+      - ${APPDATA}/recyclarr:/config
+    environment:
+      - TZ=${TZ}
+      - RADARR_BASE_URL=${RADARR_BASE_URL}
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      - SONARR_BASE_URL=${SONARR_BASE_URL}
+      - SONARR_API_KEY=${SONARR_API_KEY}
+    labels:
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+
+  abs:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: ghcr.io/advplyr/audiobookshelf:latest
+    container_name: abs
+    networks:
+      - homelab
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    environment:
+      - AUDIOBOOKSHELF_UID=${PUID}
+      - AUDIOBOOKSHELF_GID=${PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${APPDATA}/abs/config:/config
+      - ${APPDATA}/abs/metadata:/metadata
+      - podcasts:/podcasts
+      - books:/books
+    expose:
+      - 80
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.abs.entryPoints=https"
+      - "traefik.http.routers.abs.service=abs"
+      - "traefik.http.services.abs.loadbalancer.server.port=80"
+      - "traefik.http.routers.abs.middlewares=authelia@docker"
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+      - "nautical-backup.override-source-dir=abs/metadata/backups"
+      - "nautical-backup.keep_src_dir_name=false"
+      - "nautical-backup.override-destination-dir=abs"
+
+  jellystats:
+    # NAUTICAL_BACKUP_FUNCTIONAL: TBD
+    image: cyfershepard/jellystat:latest
+    container_name: jellystats
+    restart: always
+    networks:
+      - homelab
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      postgres:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ROOT_PASSWD}
+      POSTGRES_IP: postgres
+      POSTGRES_PORT: 5432
+      JWT_SECRET: 'my-secret-jwt-key'
+      TZ: ${TZ}
+    expose:
+      - 3000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jellystats.entrypoints=https"
+      - "traefik.http.routers.jellystats.service=jellystats"
+      - "traefik.http.services.jellystats.loadbalancer.server.port=3000"
+      - "traefik.http.routers.jellystats.middlewares=authelia@docker"
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+
+  # #######################################################################
+  #
+  #                               Broadcasting
+  #
+  # #######################################################################
+  ersatztv:
+    # NAUTICAL_BACKUP_FUNCTIONAL: partial
+    image: jasongdove/ersatztv:latest-vaapi
+    container_name: ersatztv
+    privileged: true
+    restart: always
+    networks:
+      - homelab
+    environment:
+      - Bugsnag:Enable=false
+    expose:
+      - 8409
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "105"
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/ersatztv:/root/.local/share/ersatztv
+      - movies:/movies
+      - tv:/tv
+      - musicv:/musicv
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ersatztv.entrypoints=https"
+      - "traefik.http.routers.ersatztv.service=ersatztv"
+      - "traefik.http.services.ersatztv.loadbalancer.server.port=8409"
+      - "traefik.http.routers.ersatztv.middlewares=authelia@docker"
+      - "nautical-backup.enable=false"
+      - "nautical-backup.stop-before-backup=true"
+
+  # #######################################################################
+  #
+  #                               Downloads
+  #
+  # #######################################################################
+  metube:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: alexta69/metube:latest
+    container_name: metube
+    networks:
+      - homelab
+    restart: always
+    depends_on:
+      ### NEED Gluetun ###
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    volumes:
+      - metube:/downloads
+    environment:
+      - OUTPUT_TEMPLATE=%(title).50s [%(id)s].%(ext)s
+      - UID=3000
+      - GID=3000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.metube.entrypoints=https"
+      - "traefik.http.routers.metube.service=metube"
+      - "traefik.http.services.metube.loadbalancer.server.port=8081"
+      - "traefik.http.routers.metube.middlewares=authelia@docker"
+
+  # #######################################################################
+  #
+  #                               Databases
+  #
+  # #######################################################################
+  mariadb:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: mariadb:10
+    container_name: mariadb
+    restart: always
+    # user: "${PUID}:${PGID}"
+    hostname: mariadb
+    networks:
+      - homelab
+    depends_on:
+      - dozzle
+    ports:
+      - 3306:3306
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/mariadb:/var/lib/mysql
+    environment:
+      - TZ=${TZ}
+      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWD}
+      - MARIADB_AUTO_UPGRADE=true
+
+  postgres:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: postgres:14
+    container_name: postgres
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - ${APPDATA}/postgres:/var/lib/postgresql/data
+      - ${APPDATA}/postgres-backups:/tmp
+    command: -c log_statement=all
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_ROOT_PASSWD}
+    ports:
+      - 5432:5432
+
+  # #######################################################################
+  #
+  #                               Development
+  #
+  # #######################################################################
+
+  registry:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: registry:latest
+    container_name: registry
+    restart: always
+    networks:
+      - homelab
+    expose:
+      - 5000
+    volumes:
+      - ${APPDATA}/registry:/var/lib/registry
+    environment:
+      REGISTRY_HTTP_HEADERS_Access-Control-Allow-Origin: '[https://${REGISTRY_SERVER}]'
+      REGISTRY_HTTP_HEADERS_Access-Control-Allow-Methods: '[HEAD,GET,OPTIONS,DELETE]'
+      REGISTRY_HTTP_HEADERS_Access-Control-Allow-Credentials: '[true]'
+      REGISTRY_HTTP_HEADERS_Access-Control-Allow-Headers: '[Authorization,Accept,Cache-Control]'
+      REGISTRY_HTTP_HEADERS_Access-Control-Expose-Headers: '[Docker-Content-Digest]'
+      REGISTRY_STORAGE_DELETE_ENABLED: 'true'
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.registry.entrypoints=https"
+      - "traefik.http.routers.registry.service=registry"
+      - "traefik.http.services.registry.loadbalancer.server.port=5000"
+
+  hub:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: joxit/docker-registry-ui:latest
+    restart: always
+    container_name: hub
+    networks:
+      - homelab
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+    expose:
+      - 80
+    environment:
+      - SINGLE_REGISTRY=true
+      # - REGISTRY_URL=https://registry.${DOMAINSUFFIX}
+      - REGISTRY_TITLE=Docker Registry UI
+      - DELETE_IMAGES=true
+      - SHOW_CONTENT_DIGEST=true
+      - NGINX_PROXY_PASS_URL=http://registry:5000
+      - SHOW_CATALOG_NB_TAGS=true
+      - CATALOG_MIN_BRANCHES=1
+      - CATALOG_MAX_BRANCHES=1
+      - TAGLIST_PAGE_SIZE=100
+      - REGISTRY_SECURED=false
+      - CATALOG_ELEMENTS_LIMIT=1000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hub.entrypoints=https"
+      - "traefik.http.routers.hub.service=hub"
+      - "traefik.http.services.hub.loadbalancer.server.port=80"
+      - "traefik.http.routers.hub.middlewares=authelia@docker"
+
+  forge:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    # image: gitea/gitea:1.21
+    image: codeberg.org/forgejo/forgejo:7
+    restart: always
+    container_name: forge
+    networks:
+      - homelab
+    depends_on:
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - FORGEJO__database__DB_TYPE=mysql
+      - FORGEJO__database__HOST=mariadb:3306
+      - FORGEJO__database__NAME=gitea
+      - FORGEJO__database__PASSWD=${FORGEJO_MARIAB_PASSWD}
+      - FORGEJO__database__USER=gitea
+    expose:
+      - 3000
+      - 22
+    volumes:
+      - ${APPDATA}/gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.forge.entrypoints=https"
+      - "traefik.http.routers.forge.service=forge"
+      - "traefik.http.services.forge.loadbalancer.server.port=3000"
+      - "nautical-backup.enable=false"
+      - "nautical-backup.stop-before-backup=true"
+
+  runner:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: gitea/act_runner:0.2.6
+    container_name: runner
+    restart: unless-stopped
+    depends_on:
+      forge:
+        condition: "service_started"
+    networks:
+      - homelab
+    environment:
+      # - CONFIG_FILE=/config.yaml
+      - GITEA_INSTANCE_URL=http://forge:3000
+      - GITEA_RUNNER_REGISTRATION_TOKEN=${FORGEJO_RUNNER}
+      - GITEA_RUNNER_NAME="Cabrini"
+      - GITEA_RUNNER_LABELS=selfhosted
+    volumes:
+      # - ${APPDATA}/runner/config.yaml:/config.yaml
+      - ${APPDATA}/runner/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+
+  # #######################################################################
+  #
+  #                               Tube Archivist
+  #
+  # #######################################################################
+  tubearchive:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    container_name: tubearchive
+    restart: unless-stopped
+    image: bbilly1/tubearchivist:latest
+    # network_mode: "service:archivist-transmission"
+    networks:
+      - homelab
+    volumes:
+      - tubearchive:/youtube
+      - ${APPDATA}/tubearchive/cache:/cache
+    expose:
+      - 8000
+    environment:
+      - ES_URL=http://archivist-es:9200                       # needs protocol e.g. http and port
+      - REDIS_HOST=archivist-redis                            # don't add protocol
+      - TA_HOST=tubearchive.${DOMAINSUFFIX}                   # set your host name
+      - TA_USERNAME=${TUBEARCHIVE_USERNAME}                   # your initial TA credentials
+      - TA_PASSWORD=${TUBEARCHIVE_PASSWORD}                   # your initial TA credentials
+      - ELASTIC_PASSWORD=${TUBEARCHIVE_SECRET}                # set password for Elasticsearch
+      - TZ=${TZ}                                              # set your time zone
+    depends_on:
+      archivist-es:
+        condition: "service_started"
+      archivist-redis:
+        condition: "service_started"
+      dozzle:
+        condition: "service_started"
+      proxy:
+        condition: "service_started"
+      authelia:
+        condition: "service_healthy"
+      ### NEED GLUETUN ###
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tubearchive.entrypoints=https"
+      - "traefik.http.routers.tubearchive.service=tubearchive"
+      - "traefik.http.services.tubearchive.loadbalancer.server.port=8000"
+      # - "traefik.http.routers.tubearchive.middlewares=authelia@docker"
+      - "nautical-backup.enable=false"
+      - "nautical-backup.stop-before-backup=false"
+
+  archivist-redis:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    image: redis/redis-stack-server:latest
+    container_name: archivist-redis
+    restart: unless-stopped
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    volumes:
+      - ${APPDATA}/tubearchive/redis:/data
+    labels:
+      - "nautical-backup.enable=false"
+      - "nautical-backup.stop-before-backup=false"
+
+  archivist-es:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    image: bbilly1/tubearchivist-es:latest         # only for amd64, or use official es 8.9.0
+    container_name: archivist-es
+    restart: unless-stopped
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    environment:
+      - "ELASTIC_PASSWORD=verysecret"       # matching Elasticsearch password
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "xpack.security.enabled=true"
+      - "discovery.type=single-node"
+      - "path.repo=/usr/share/elasticsearch/data/snapshot"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ${APPDATA}/tubearchive/es:/usr/share/elasticsearch/data    # check for permission error when using bind mount, see readme
+    labels:
+      - "nautical-backup.enable=false"
+      - "nautical-backup.stop-before-backup=false"
+
+  # #######################################################################
+  #
+  #                               Backups
+  #
+  # #######################################################################
+  nautical:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: minituff/nautical-backup:2
+    restart: unless-stopped
+    container_name: nautical
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}:/app/source
+      - nautical:/app/destination
+    environment:
+      - TZ=${TZ}
+      - REQUIRE_LABEL=true
+      - BACKUP_ON_START=true
+      - RSYNC_CUSTOM_ARGS=--size-only --exclude='*.log' --exclude='transcodes' --delete --no-owner --no-perms --no-group
+      - ADDITIONAL_FOLDERS=poppincentsv2
+      - POST_BACKUP_CURL=curl -X GET http://192.168.5.3:3001/api/push/bMf9iTlBpE
+      # - LOG_LEVEL=DEBUG
+
+  db-backup:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    container_name: db-backup
+    image: tiredofit/db-backup
+    restart: unless-stopped
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    volumes:
+      - ${APPDATA}/db-backup:/backup
+    labels:
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+    environment:
+      - TIMEZONE=America/New_York
+      - CONTAINER_NAME=db-backup
+      - CONTAINER_ENABLE_MONITORING=FALSE
+      - DEBUG_MODE=false
+      - DEFAULT_FILESYSTEM_PATH_PERMISSION=775
+      - DEFAULT_FILESYSTEM_PERMISSION=775
+      - USER_DBBACKUP=${PUID}
+      - GROUP_DBBACKUP=${PGID}
+
+      - BACKUP_JOB_CONCURRENCY=1       # Only run one job at a time
+      - DEFAULT_CHECKSUM=NONE          # Don't create checksums
+      - DEFAULT_COMPRESSION=ZSTD       # Compress all with ZSTD
+      - DEFAULT_BACKUP_INTERVAL=1440   # Backup every 1440 minutes
+      - DEFAULT_BACKUP_BEGIN=+0        # Start right away
+      - DEFAULT_CLEANUP_TIME=8640      # Cleanup backups after a week
+
+      - DB01_TYPE=mariadb
+      - DB01_HOST=mariadb
+      - DB01_NAME=*
+      - DB01_USER=root
+      - DB01_PASS=${MARIADB_ROOT_PASSWD}
+
+      - DB02_TYPE=redis
+      - DB02_HOST=archivist-redis
+      - DB02_PORT=6379
+
+      - DB03_TYPE=postgres
+      - DB03_HOST=postgres
+      - DB03_NAME=ALL
+      - DB03_USER=postgres
+      - DB03_PASS=${POSTGRES_ROOT_PASSWD}
+
+      - DB04_TYPE=redis
+      - DB04_HOST=librenms-redis
+      - DB04_PORT=6379
+
+  # #######################################################################
+  #
+  #                               Storage
+  #
+  # #######################################################################
+  truecommand:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: ixsystems/truecommand
+    container_name: truecommand
+    restart: always
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/truecommand:/data
+    expose:
+      - 80
+      - 443
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.truecommand.entryPoints=https"
+      - "traefik.http.routers.truecommand.service=truecommand"
+      - "traefik.http.services.truecommand.loadBalancer.server.port=80"
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+
+  # #######################################################################
+  #
+  #                               LibreNMS
+  #
+  # #######################################################################
+  librenms:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    image: librenms/librenms:latest
+    container_name: librenms
+    hostname: librenms
+    networks:
+      - homelab
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    expose:
+      - 8000
+    depends_on:
+      - mariadb
+      - librenms-redis
+    volumes:
+      - ${APPDATA}/librenms:/data
+    environment:
+      - "TZ=${TZ}"
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "DB_HOST=mariadb"
+      - "DB_NAME=librenms"
+      - "DB_USER=librenms"
+      - "DB_PASSWORD=${LIBRENMS_MYSQL_PASSWORD}"
+      - "DB_TIMEOUT=60"
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.librenms.entryPoints=https"
+      - "traefik.http.routers.librenms.service=librenms"
+      - "traefik.http.services.librenms.loadBalancer.server.port=8000"
+      - "nautical-backup.enable=true"
+      - "nautical-backup.stop-before-backup=false"
+
+  librenms-redis:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    image: redis:5.0-alpine
+    container_name: librenms_redis
+    networks:
+      - homelab
+    environment:
+      - "TZ=${TZ}"
+    restart: always
+
+  dispatcher:
+    # NAUTICAL_BACKUP_FUNCTIONAL: false
+    image: librenms/librenms:latest
+    container_name: librenms_dispatcher
+    hostname: librenms-dispatcher
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      - homelab
+    depends_on:
+      - librenms
+      - librenms-redis
+    volumes:
+      - "${APPDATA}/librenms:/data"
+    environment:
+      - "TZ=${TZ}"
+      - "PUID=${PUID}"
+      - "PGID=${PGID}"
+      - "DB_HOST=mariadb"
+      - "DB_NAME=librenms"
+      - "DB_USER=librenms"
+      - "DB_PASSWORD=${LIBRENMS_MYSQL_PASSWORD}"
+      - "DB_TIMEOUT=60"
+      - "DISPATCHER_NODE_ID=dispatcher1"
+      - "SIDECAR_DISPATCHER=1"
+      - "REDIS_HOST=redis-librenms"
+    restart: always
+
+  # #######################################################################
+  #
+  #                               Updates
+  #
+  # #######################################################################
+
+  watchtower:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: always
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+# #######################################################################
+#
+#                               Networks
+#
+# #######################################################################
+networks:
+  homelab:
+  dmz:
+
+# #######################################################################
+#
+#                               Volumes
+#
+# #######################################################################
+volumes:
+  movies:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: ":/mnt/twins/movies"
+  immich:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/immich"
+  tv:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: ":/mnt/twins/tv"
+  music:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Music"
+  musicv:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Music Videos"
+  homemovies:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Home Videos"
+  transmission:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/transmission"
+  books:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Books"
+  metube:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/metube"
+  podcasts:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Podcasts"
+  recordings:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Recordings"
+  tdarrcache:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/tdarrcache"
+  tubearchive:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/tubearchive"
+  nautical:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: ":/mnt/twins/CabriniBackups"

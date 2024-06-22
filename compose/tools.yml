@@ -1,0 +1,180 @@
+services:
+
+  # #######################################################################
+  #
+  #                               Tools
+  #
+  # #######################################################################
+  dozzle:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - 9999:8080
+    environment:
+      - DOZZLE_NO_ANALYTICS=false
+
+  # #######################################################################
+  #
+  #                               Databases
+  #
+  # #######################################################################
+
+  postgres:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: postgres:14
+    container_name: postgres
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - ${APPDATA}/postgres:/var/lib/postgresql/data
+      - ${APPDATA}/postgres-backups:/tmp
+    command: -c log_statement=all
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_ROOT_PASSWD}
+    ports:
+      - 5432:5432
+
+  mongodb:
+    image: mongo:5
+    container_name: mongodb
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - ${APPDATA}/mongodb:/data/db
+
+  # #######################################################################
+  #
+  #                               Graylog
+  #
+  # #######################################################################
+
+  datanode:
+    image: ${DATANODE_IMAGE:-graylog/graylog-datanode:6.0}
+    container_name: graylog-datanode
+    hostname: datanode
+    restart: always
+    networks:
+      - homelab
+    environment:
+      GRAYLOG_DATANODE_NODE_ID_FILE: "/var/lib/graylog-datanode/node-id"
+      GRAYLOG_DATANODE_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET:?Please configure GRAYLOG_PASSWORD_SECRET in the .env file}"
+      GRAYLOG_DATANODE_ROOT_PASSWORD_SHA2: "${GRAYLOG_ROOT_PASSWORD_SHA2:?Please configure GRAYLOG_ROOT_PASSWORD_SHA2 in the .env file}"
+      GRAYLOG_DATANODE_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+    ulimits:
+      memlock:
+        hard: -1
+        soft: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - 8999:8999   # DataNode API
+      - 9200:9200
+      - 9300:9300
+    volumes:
+      - ${APPDATA}/graylog-datanode:/var/lib/graylog-datanode
+
+  graylog:
+    image: ${GRAYLOG_IMAGE:-graylog/graylog-enterprise:6.0}
+    container_name: graylog
+    hostname: graylog
+    restart: always
+    networks:
+      - homelab
+    depends_on:
+      mongodb:
+        condition: "service_started"
+    entrypoint: "/usr/bin/tini --  /docker-entrypoint.sh"
+    environment:
+      GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/data/node-id"
+      GRAYLOG_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET:?Please configure GRAYLOG_PASSWORD_SECRET in the .env file}"
+      GRAYLOG_ROOT_PASSWORD_SHA2: "${GRAYLOG_ROOT_PASSWORD_SHA2:?Please configure GRAYLOG_ROOT_PASSWORD_SHA2 in the .env file}"
+      GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
+      GRAYLOG_HTTP_EXTERNAL_URI: "http://192.168.3.3:9000/"
+      GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+      # To make reporting (headless_shell) work inside a Docker container
+      GRAYLOG_REPORT_DISABLE_SANDBOX: "true"
+    ports:
+      - 1514:1514
+      - 1514:1514/udp
+      - 12201:12201
+      - 12201:12201/udp
+      - 9000:9000
+    volumes:
+      - ${APPDATA}/graylog_data:/usr/share/graylog/data/data
+      - ${APPDATA}/graylog_journal:/usr/share/graylog/data/journal
+
+# #######################################################################
+#
+#                               Zabbix
+#
+# #######################################################################
+  zabbix:
+    image: zabbix/zabbix-server-pgsql:alpine-6.4-latest
+    container_name: zabbix
+    hostname: zabbix
+    restart: unless-stopped
+    networks:
+      - homelab
+    depends_on:
+      - postgres
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "10051:10051"
+    volumes:
+      - ${APPDATA}/zabbix/zabbix-server-data:/var/lib/zabbix
+      - ${APPDATA}/zabbix/zabbix-snmptraps-data:/var/lib/zabbix/snmptraps
+      - ${APPDATA}/zabbix/zabbix-export-data:/var/lib/zabbix/export
+
+  zabbix-web:
+    image: zabbix/zabbix-web-apache-pgsql:alpine-6.4-latest
+    container_name: zabbix-web
+    hostname: zabbix-web
+    restart: unless-stopped
+    networks:
+      - homelab
+    depends_on:
+      - postgres
+      - zabbix
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      ZBX_SERVER_HOST: zabbix
+      PHP_TZ: ${TZ}
+    ports:
+      - 8080:8080
+    volumes:
+      - ${APPDATA}/zabbix/zabbix-web-data:/usr/share/zabbix
+
+# #######################################################################
+#
+#                               Networks
+#
+# #######################################################################
+networks:
+  homelab:
+
+# #######################################################################
+#
+#                               Volumes
+#
+# #######################################################################

@@ -1,0 +1,193 @@
+services:
+
+  # #######################################################################
+  #
+  #                               Tools
+  #
+  # #######################################################################
+  dozzle:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: always
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - 9999:8080
+    environment:
+      - DOZZLE_NO_ANALYTICS=false
+
+  # #######################################################################
+  #
+  #                               Media Management
+  #
+  # #######################################################################
+  jellyfin:
+    # NAUTICAL_BACKUP_FUNCTIONAL: partial
+    image: ${REGISTRY_SERVER}/jellyfin-yt-dlp:10.9.6
+    container_name: jellyfin
+    privileged: true
+    restart: always
+    user: ${PUID}:${PGID}
+    network_mode: host
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "105"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}/jellyfin/config:/config
+      - ${APPDATA}/jellyfin/cache:/cache
+      - movies:/movies
+      - books:/books
+      - tv:/tv
+      - homemovies:/homemovies
+      - music:/music
+      - musicv:/musicv
+      - recordings:/recordings
+      - tubearchive:/youtube:ro
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      - TZ=${TZ}
+      - JELLYFIN_PublishedServerUrl=https://jellyfin.${DOMAIN_SUFFIX}
+
+  # #######################################################################
+  #
+  #                               Backups
+  #
+  # #######################################################################
+  nautical:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: minituff/nautical-backup:2
+    restart: unless-stopped
+    container_name: nautical
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    networks:
+      - homelab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APPDATA}:/app/source
+      - nautical:/app/destination
+    environment:
+      - TZ=${TZ}
+      - REQUIRE_LABEL=true
+      - BACKUP_ON_START=true
+      - RSYNC_CUSTOM_ARGS=--size-only --exclude='*.log' --exclude='transcodes' --delete --no-owner --no-perms --no-group
+      - POST_BACKUP_CURL=curl -X GET http://192.168.5.3:3001/api/push/y4wg8eH0bc
+      # - LOG_LEVEL=DEBUG
+
+
+
+  # #######################################################################
+  #
+  #                               Updates
+  #
+  # #######################################################################
+
+  watchtower:
+    # NAUTICAL_BACKUP_FUNCTIONAL: true
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: always
+    depends_on:
+      dozzle:
+        condition: "service_started"
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+# #######################################################################
+#
+#                               Networks
+#
+# #######################################################################
+networks:
+  homelab:
+  dmz:
+
+# #######################################################################
+#
+#                               Volumes
+#
+# #######################################################################
+volumes:
+  movies:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: ":/mnt/twins/movies"
+  immich:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/immich"
+  tv:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: ":/mnt/twins/tv"
+  music:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Music"
+  musicv:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Music Videos"
+  homemovies:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Home Videos"
+  transmission:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/transmission"
+  books:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Books"
+  metube:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/metube"
+  podcasts:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Podcasts"
+  recordings:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/Recordings"
+  tdarrcache:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/tdarrcache"
+  tubearchive:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: "${MEDIAPATH}/tubearchive"
+  nautical:
+    driver_opts:
+      type: nfs
+      o: "${NFSCONFIG}"
+      device: ":/mnt/twins/CabriniBackups"

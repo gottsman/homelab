@@ -1,0 +1,37 @@
+services:
+
+
+  # ****************************** Dozzle *********************************
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOZZLE_NO_ANALYTICS=false
+    ports:
+      - 9999:8080
+
+  # ****************************** Ser2sock ****************************
+  ser2sock:
+    image: ${REGISTRY_SERVER}/ser2sock:latest
+    container_name: ser2sock
+    restart: always
+    ports:
+      - 10000:10000
+    depends_on:
+      - dozzle
+    environment:
+      - SERIAL_DEVICE=/dev/ttyUSB0
+      - BAUD_RATE=115200
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+
+  # ****************************** Watchtower ****************************
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+vars:
+  PATH_ERROR: is not installed or correctly configured in PATH.
+
+includes:
+  hack: .taskfiles/hacks.yaml
+  compose: .taskfiles/compose.yaml
+  metal: .taskfiles/metal.yaml
+  cluster: .taskfiles/cluster.yaml
+  public: .taskfiles/public.yaml
+  win2019: .taskfiles/win2019.yaml
+
+tasks:
+  default:
+    silent: true
+    cmds: ["task -l"]

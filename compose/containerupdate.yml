@@ -1,0 +1,62 @@
+---
+
+- name: Copy Traefik config
+  hosts: cabrini
+  gather_facts: false
+  become: true
+  vars:
+    interpreter_python: auto_silent
+    transfer_method: piped
+  tasks:
+    - name: Copy Traefik config files
+      ansible.builtin.copy:
+        src: "../compose/traefik-config.yml"
+        dest: "/home/cabrini/traefik/config.yml"
+        mode: '0600'
+        owner: "root"
+        group: "root"
+
+- name: Copy Cabrini private config
+  hosts: cabrini
+  gather_facts: false
+  become: true
+  vars:
+    interpreter_python: auto_silent
+    transfer_method: piped
+  tasks:
+    - name: Copy Traefik config files
+      ansible.builtin.copy:
+        src: "../compose/cabrini-private.yml"
+        dest: "/home/cabrini/docker-private.yml"
+        mode: '0644'
+        owner: "cabrini"
+        group: "cabrini"
+
+- name: Let's update the docker environment
+  hosts: docker
+  gather_facts: false
+  vars:
+    interpreter_python: auto_silent
+    transfer_method: piped
+  tasks:
+    - name: Copy Docker files
+      ansible.builtin.copy:
+        src: "../compose/{{ inventory_hostname }}.yml"
+        dest: ~/docker-compose.yml
+        mode: '0600'
+      register: compose_change
+    - name: Copy Docker environment variables
+      ansible.builtin.copy:
+        src: "../compose/{{ inventory_hostname }}.env"
+        dest: ~/.env
+        mode: '0600'
+      register: environment_change
+    - name: Pull required Docker images and restart
+      ansible.builtin.shell:
+        cmd: |
+          export PATH=/usr/local/bin:$PATH
+          docker compose up -d --remove-orphans
+      when: compose_change.changed or environment_change.changed
+      changed_when: output.rc != 0
+      register: output
+  tags: docker
